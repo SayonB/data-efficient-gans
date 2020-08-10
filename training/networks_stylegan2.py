@@ -6,6 +6,7 @@
 
 """Network architectures used in the StyleGAN2 paper."""
 
+import os
 import numpy as np
 import tensorflow as tf
 import dnnlib
