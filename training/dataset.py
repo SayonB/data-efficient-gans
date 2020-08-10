@@ -116,8 +116,6 @@ class TFRecordDataset:
             assert self._np_labels.ndim == 2
         if max_label_size != 'full' and self._np_labels.shape[1] > max_label_size:
             self._np_labels = self._np_labels[:, :max_label_size]
-        if max_images is not None and self._np_labels.shape[0] > max_images:
-            self._np_labels = self._np_labels[:max_images]
         self.label_size = self._np_labels.shape[1]
         self.label_dtype = self._np_labels.dtype.name
         self.tfr = list(zip(tfr_files, tfr_shapes, tfr_lods))
@@ -133,8 +131,6 @@ class TFRecordDataset:
                   if tfr_lod < 0:
                       continue
                   dset = tf.data.TFRecordDataset(tfr_file, compression_type='', buffer_size=buffer_mb<<20)
-                  if max_images is not None:
-                      dset = dset.take(max_images)
                   dset = dset.map(self.parse_tfrecord_tf, num_parallel_calls=num_threads)
                   dset = tf.data.Dataset.zip((dset, self._tf_labels_dataset))
                   bytes_per_item = np.prod(tfr_shape) * np.dtype(self.dtype).itemsize
