@@ -533,7 +533,7 @@ def training_loop(
 
     # Load training set.
     def load_training_set(**kws):
-        return dataset.load_dataset(data_dir=dnnlib.convert_path(data_dir), verbose=True, **dataset_args, **kws)
+        return dataset.load_dataset(verbose=True, **dataset_args)
     input_fn, training_set = get_input_fn(load_training_set, num_gpus, mirror_augment=mirror_augment, drange_net=drange_net)
 
     def model_fn(features, labels, mode, params):
