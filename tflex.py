@@ -10,20 +10,152 @@ import shutil
 import tempfile
 import traceback
 import time
-
-from tensorflow.contrib import tpu
-from tensorflow.contrib.cluster_resolver import TPUClusterResolver
-from tensorflow.python.framework import dtypes
-
 import threading
 
-def parallelize(xs, thunk, *args):
+from tensorflow.python.framework import dtypes
+from tensorflow.python.distribute.cluster_resolver import TPUClusterResolver as BaseTPUClusterResolver
+from tensorflow.python.training import server_lib
+from tensorflow.core.protobuf import rewriter_config_pb2
+from tensorflow.contrib import tpu
+
+class _DefaultState(threading.local):
+  def __init__(self, **kws):
+    super(_DefaultState, self).__init__()
+    for k, v in kws.items():
+      setattr(self, k, v)
+
+  def save(self):
+    return [(k, v) for k, v in self.__dict__.items()]
+
+  def restore(self, state):
+    for k, v in state:
+      setattr(self, k, v)
+
+local = _DefaultState()
+lock = threading.RLock()
+
+def with_defaults(thunk):
+  with lock:
+    state = local.save()
+    session = tf.get_default_session() or get_default_session()
+    graph = tf.get_default_graph() or get_default_graph()
+  def f(*args, **kws):
+    with lock:
+      local.restore(state)
+    lock.acquire()
+    with session.as_default() if session else nullcontext():
+      with graph.as_default() if graph else nullcontext():
+        lock.release()
+        result = thunk(*args, **kws)
+        lock.acquire()
+    lock.release()
+    return result
+  return f
+
+def get_default(name, required=True):
+  with lock:
+    value = getattr(local, name) if hasattr(local, name) else None
+  if required:
+    assert value is not None
+  return value
+
+def set_default(name, value):
+  with lock:
+    setattr(local, name, value)
+
+def ensure_default(name, value):
+  with lock:
+    current = get_default(name, required=False)
+    if current is None:
+      set_default(name, value)
+    return value
+
+def get_default_session(required=False):
+  return get_default('session', required=required)
+
+def get_default_graph(required=False):
+  return get_default('graph', required=required)
+
+class Future(object):
+  def __init__(self, dependencies, thunk, *args, **kws):
+    if isinstance(dependencies, Future):
+      dependencies = [dependencies]
+    self.dependencies = [defer(_) if callable(_) else _ for _ in dependencies]
+    if thunk is None:
+      thunk = lambda: None
+    self.thunk = thunk
+    self.args = args
+    self.kws = kws
+    self.result = None
+    self.complete = False
+    self.thread = None
+    self.daemon = True
+    self.error = None
+  def run(self):
+    try:
+      self.result = self.thunk(*self.args, **self.kws)
+    except Exception as e:
+      traceback.print_exc()
+      self.error = e
+    self.complete = True
+  def run_async(self):
+    assert self.thread is None
+    def thunk():
+      [_.join() for _ in self.dependencies]
+      self.run()
+    self.thread = threading.Thread(target=with_defaults(thunk), daemon=self.daemon)
+    self.thread.start()
+  def join(self):
+    if not self.complete:
+      assert self.thread
+      while not self.complete:
+        time.sleep(1.0)
+    return self.result
+
+def defer(thunk, *args, **kws):
+  dependencies = []
+  if 'dependencies' in kws:
+    dependencies = kws.pop('dependencies')
+  future = Future(dependencies=dependencies, thunk=thunk, *args, **kws)
+  future.run_async()
+  return future
+
+def parallelize(xs, thunk, *args, daemon=True):
   threads = []
   for x in xs:
-    thread = threading.Thread(target=thunk, args=(x, *args))
+    thread = threading.Thread(target=with_defaults(thunk), args=(x, *args), daemon=daemon)
     thread.start()
     threads.append(thread)
   return threads
+
+def parallelize_verbose(label, xs, thunk, *args, daemon=True):
+  xs = [x for x in xs]
+  with tqdm.tqdm(total=len(xs)) as pbar:
+    pbar.set_description(label)
+    def run(*args, **kws):
+      try:
+        return thunk(*args, **kws)
+      finally:
+        pbar.update(1)
+    return parallelize(xs, run, *args, daemon=daemon)
+
+def parallelize_verbose(label, xs, thunk, *args, daemon=True, synchronous=False):
+  xs = [x for x in xs]
+  if synchronous:
+    for i in tqdm.trange(len(xs), desc=label):
+      x = xs[i]
+      thunk(x, *args)
+  else:
+    with tqdm.tqdm(total=len(xs)) as pbar:
+      pbar.set_description(label)
+      threads = parallelize(xs, thunk, *args, daemon=daemon)
+      while len(threads) > 0:
+        for i in range(len(threads)):
+          if not threads[i].is_alive():
+            pbar.update(1)
+            threads.remove(threads[i])
+            break
+        time.sleep(0.1)
 
 # http://stackoverflow.com/questions/1624883/alternative-way-to-split-a-list-into-groups-of-n
 import itertools
@@ -47,23 +179,124 @@ if not hasattr(state, 'noisy'):
 if not hasattr(state, 'debug'):
   state.debug = 'DEBUG' in os.environ
 
-def get_tpu_addr(tpu_name=None):
-    # Get the TPU's location
-    if tpu_name is not None:
-      return TPUClusterResolver(tpu_name).get_master()
-    if 'COLAB_TPU_ADDR' in os.environ:
-      return TPUClusterResolver().get_master()
-    elif 'TPU_NAME' in os.environ:
-      return TPUClusterResolver(os.environ['TPU_NAME']).get_master()
+if not hasattr(state, 'noisy_backtrace'):
+  state.noisy_backtrace = 'NOISY_BACKTRACE' in os.environ
 
-def get_session_target(target='auto'):
-    if target == 'auto':
-      target = get_tpu_addr()
-    elif target is not None:
-      target = get_tpu_addr(target)
-    if target is not None:
-      print("Using TPU %s" % target)
-    return target
+if not hasattr(state, 'break_next_run'):
+  state.break_next_run = False
+
+def reroute(addr, host=None):
+  if host is None or host is False:
+    return addr
+  if addr.startswith('grpc://'):
+    return 'grpc://' + reroute(addr[len('grpc://'):], host=host)
+  if not re.match('[0-9]+[.][0-9]+[.][0-9]+[.][0-9]+[:]8470', addr):
+    return addr
+  if not addr.endswith(':8470'):
+    return addr
+  a, b, c, d = [int(x) for x in addr.split(':')[0].split('.')]
+  if a == 10 and b in [48, 49]:
+    assert (d == 2)
+    port = b * 1000 + c
+  elif a == 10 and b in range(2, 66) and c == 0:
+    port = b * 1000 + d
+  else:
+    return addr
+  return host + ':' + str(port)
+
+
+class TPUClusterResolver(BaseTPUClusterResolver):
+  def __init__(self, *args, host=None, **kws):
+    super(TPUClusterResolver, self).__init__(*args, **kws)
+    if host is None:
+      if 'TPU_HOST' in os.environ:
+        host = os.environ['TPU_HOST']
+    self._host = host
+
+  def master(self, *args, **kws):
+    ip = super(TPUClusterResolver, self).master(*args, **kws)
+    return reroute(ip, host=self._host)
+
+  def cluster_spec(self):
+    spec = super(TPUClusterResolver, self).cluster_spec()
+    r = dict()
+    for k, v in spec.as_dict().items():
+      r[k] = [reroute(ip, host=self._host) for ip in v]
+    return server_lib.ClusterSpec(r)
+
+def init_tpu(name, host=None, timeout_in_ms=600 * 60 * 1000):
+  tpu_init = [tpu.initialize_system()]
+  cluster_resolver = TPUClusterResolver(name, host=host)
+  config = tf.ConfigProto(operation_timeout_in_ms=timeout_in_ms,
+                          graph_options=tf.GraphOptions(
+                            rewrite_options=rewriter_config_pb2.RewriterConfig(
+                              disable_meta_optimizer=True)),
+                          isolate_session_state=True)
+  cluster_spec = cluster_resolver.cluster_spec()
+  if cluster_spec:
+    config.cluster_def.CopyFrom(cluster_spec.as_cluster_def())
+  init_sess = tf.Session(cluster_resolver.get_master(), config=config)
+  init_sess.run(tpu_init)
+  return init_sess, cluster_resolver
+
+def get_session(session=None):
+  if session is None:
+    session = get_default_session()
+  return session
+
+def get_devices(session=None):
+  session = get_session(session)
+  if hasattr(session, '_cached_devices'):
+    devices = session._cached_devices
+  else:
+    devices = session._cached_devices = session.list_devices()
+  return devices
+
+def has_gpu(session=None):
+  session = get_session(session)
+  if hasattr(session, '_has_gpu'):
+    result = session._has_gpu
+  else:
+    devices = get_devices(session=session)
+    result = session._has_gpu = len([x for x in devices if ':GPU:' in x.name]) > 0
+  return result
+
+def has_tpu(session=None):
+  session = get_session(session)
+  if hasattr(session, '_has_tpu'):
+    result = session._has_tpu
+  else:
+    devices = get_devices(session=session)
+    result = session._has_tpu = len([x for x in devices if ':TPU:' in x.name]) > 0
+  return result
+
+def get_cores_from_devices(devices):
+  cores = [x for x in devices if ':TPU:' in x.name]
+  if len(cores) <= 0:
+    cores = [x for x in devices if ':GPU:' in x.name]
+  if len(cores) <= 0:
+    cores = [x for x in devices if ':CPU:' in x.name]
+  return cores
+
+def get_cores(session=None, devices=None):
+  if devices is None:
+    devices = get_devices(session=session)
+  return get_cores_from_devices(devices)
+
+def get_cpus(session=None, devices=None):
+  if devices is None:
+    devices = get_devices(session=session)
+  cpus = [x for x in devices if ':CPU:' in x.name]
+  return cpus
+
+def get_tpu_resolver(tpu_name='auto'):
+  # Get the TPU's location
+  if tpu_name != 'auto':
+    return TPUClusterResolver(tpu_name)
+  elif 'COLAB_TPU_ADDR' in os.environ:
+    return TPUClusterResolver()
+  elif 'TPU_NAME' in os.environ:
+    return TPUClusterResolver(os.environ['TPU_NAME'])
 
 def pretty(x, ellipsize=120):
   r = str(x)
@@ -71,31 +304,67 @@ def pretty(x, ellipsize=120):
     return r[0:ellipsize - 3] + '...'
   return r
 
+def print_backtrace():
+  try:
+    raise Exception("Printing traceback...")
+  except:
+    import traceback
+    traceback.print_exc()
+
 class Session(tf.Session):
-  def __init__(self, target='auto', graph=None, config=None, init_tpu=False):
-    target = get_session_target(target)
+  def __init__(self, target='auto', graph=None, config=None, init_tpu=False, id=None):
+    if config is None:
+      timeout_in_ms = int(os.environ['TIMEOUT_IN_MS']) if 'TIMEOUT_IN_MS' in os.environ else 10 * 60 * 1000
+      config = tf.ConfigProto(operation_timeout_in_ms=timeout_in_ms,
+                              graph_options=tf.GraphOptions(
+                                rewrite_options=rewriter_config_pb2.RewriterConfig(
+                                  disable_meta_optimizer=True)),
+                              isolate_session_state=True)
+    config.isolate_session_state = True
+    resolver = get_tpu_resolver(target)
+    if resolver is not None:
+      target = resolver.get_master()
+      cluster_spec = resolver.cluster_spec()
+      if cluster_spec:
+        config.cluster_def.CopyFrom(cluster_spec.as_cluster_def())
+    elif target == 'auto':
+      target = None
     super().__init__(target, graph=graph, config=config)
-    self.init_tpu=init_tpu
-    self.target = target
-    self.config = config
+    self.id = id
+    self._tflex_resolver = resolver
+    self._tflex_target = target
+    self._tflex_config = config
+    ensure_default('session', self)
+    ensure_default('devices', self.list_devices())
+    ensure_default('graph', self.graph)
+
+  @property
+  def _spec(self):
+    return '#%d' % self.id if self.id is not None else ''
 
   def ensure(self):
     if self.init_tpu:
-      print("Initializing TPU...")
+      print(self._spec, "Initializing TPU...")
       #sess.run(tpu.initialize_system())
-      initialize_tpu(session=self, timeout_in_ms=20000)
+      init_tpu(session=self, timeout_in_ms=20000)
       self.init_tpu = None
 
   def run(self, *args, **kws):
+    if state.break_next_run:
+      import pdb; pdb.set_trace()
     if state.debug:
       check_commands()
     if state.noisy:
-      print('Session.run', *[pretty(x) for x in args], *[pretty(k)+'='+pretty(v) for k, v in kws.items()])
+      print(self._spec, 'Session.run', *[pretty(x) for x in args], *[pretty(k)+'='+pretty(v) for k, v in kws.items()])
+      if state.noisy_backtrace:
+        print_backtrace()
     start = time.time()
     result = super(Session, self).run(*args, **kws)
     elapsed = time.time() - start
     if state.noisy:
-      print('Session.run (finished in %.2fs)' % elapsed, pretty(result), *[pretty(x) for x in args], *[pretty(k)+'='+pretty(v) for k, v in kws.items()])
+      print(self._spec, 'Session.run (finished in %.2fs)' % elapsed, pretty(result), *[pretty(x) for x in args], *[pretty(k)+'='+pretty(v) for k, v in kws.items()])
+      if state.noisy_backtrace:
+        print_backtrace()
     return result
 
 
@@ -141,7 +410,7 @@ def truncate_value(variable, value, reshape=True):
 from tensorflow.core.protobuf import config_pb2
 
 def initialize_tpu(session=None, timeout_in_ms=None):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
   with session.as_default():
     op = tpu.initialize_system()
   options = None
@@ -150,7 +419,7 @@ def initialize_tpu(session=None, timeout_in_ms=None):
   return session.run(op, options=options)
 
 def load(variable, value, session=None, timeout_in_ms=None):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
   ops = variable.initializer
   vals = dict([(variable.initializer.inputs[1], value)])
   #for x, (k, v) in zip(variables, vals.items()):
@@ -161,7 +430,7 @@ def load(variable, value, session=None, timeout_in_ms=None):
   return session.run(ops, vals, options=options)
 
 def eval(variable, session=None, timeout_in_ms=None):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
   options = None
   if timeout_in_ms:
     options=config_pb2.RunOptions(timeout_in_ms=timeout_in_ms)
@@ -175,9 +444,11 @@ def grab_values(variables, reader, reshape=False):
     yield variable, value
 
 def assign_values(variables, values, session=None, timeout_in_ms=60000):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
+  variables = [x for x in variables]
+  values = [x for x in values]
   ops = [x.initializer for x in variables]
-  vals = dict([(x.initializer.inputs[1], value) for x, value in zip(variables, values)]) # TODO: bfloat16 support
+  vals = dict([(x.initializer.inputs[1], value.value() if isinstance(value, tf.Variable) else value) for x, value in zip(variables, values)]) # TODO: bfloat16 support
   #for x, (k, v) in zip(variables, vals.items()):
   #  print(x.name, x.shape.as_list(), k, v.shape)
   options = None
@@ -186,7 +457,7 @@ def assign_values(variables, values, session=None, timeout_in_ms=60000):
   session.run(ops, vals, options=options)
 
 def load_snapshot(ckpt, session=None, var_list=None, reshape=False):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
   reader = pywrap_tensorflow.NewCheckpointReader(ckpt)
   vs = var_list or tf.trainable_variables()
   for variables in tqdm.tqdm(list(split_by_params(vs))):
@@ -203,7 +474,7 @@ def get_variable(name, var_list=None):
           return x
 
 def load_weights(ckpt, session=None, var_list=None, reshape=False):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
   vs = var_list or tf.trainable_variables()
   files = list(sorted(glob(ckpt + '-*.npy')))
   for out in tqdm.tqdm(files):
@@ -216,7 +487,7 @@ def load_weights(ckpt, session=None, var_list=None, reshape=False):
         variable.load(value, session)
 
 def load_variables(ckpt, session=None, var_list=None, reshape=False):
-  session = session or tf.get_default_session()
+  session = session or get_default_session()
   vs = var_list or tf.trainable_variables()
   with h5py.File(ckpt, "r") as f:
     for variables in tqdm.tqdm(list(split_by_params(vs))):
@@ -233,7 +504,7 @@ state.cache_ops = {}
 
 def cast_variables(variables, graph=None, cache_ops=None):
   if graph is None:
-    graph = tf.get_default_graph()
+    graph = get_default_graph()
   if cache_ops is None:
     cache_ops = state.cache_ops
   if graph not in cache_ops:
@@ -259,7 +530,7 @@ def variable_name(variable):
   return variable.name
 
 def save_variables(ckpt, session=None, var_list=None):
-    session = session or tf.get_default_session()
+    session = session or get_default_session()
     vs = var_list or tf.trainable_variables()
     maketree(os.path.dirname(ckpt))
     fname = ckpt+'.tmp'
@@ -277,14 +548,14 @@ def save_variables(ckpt, session=None, var_list=None):
     os.rename(ckpt+'.tmp', ckpt)
 
 def fetch_variables(session=None, var_list=None):
-    session = session or tf.get_default_session()
+    session = session or get_default_session()
     vs = var_list or tf.trainable_variables()
     for variables in tqdm.tqdm(list(split_by_params(vs))):
       values = session.run(variables)
       yield variables, values
 
 def partition_variables(session=None, var_list=None):
-    session = session or tf.get_default_session()
+    session = session or get_default_session()
     vs = var_list or tf.trainable_variables()
     for variables in tqdm.tqdm(list(split_by_params(vs))):
       yield variables
@@ -633,18 +904,53 @@ from contextlib import contextmanager
 def nullcontext(enter_result=None):
     yield enter_result
 
-_devices = None
-_has_gpu = False
+def set_override_device(value, session=None):
+  session = get_session(session)
+  session._override_device = value
+  return value
 
-def has_gpu():
-  global _devices
-  global _has_gpu
-  if _devices is None:
-    _devices = tf.get_default_session().list_devices()
-    _has_gpu = len([x.name for x in _devices if ':GPU' in x.name]) > 0
-  return _has_gpu
+def has_override_device(session=None):
+  session = get_session(session)
+  return hasattr(session, '_override_device')
+
+def get_override_device(session=None):
+  session = get_session(session)
+  if hasattr(session, '_override_device'):
+    return session._override_device
+
+def set_override_cores(value, session=None):
+  session = get_session(session)
+  session._override_cores = value
+  return value
+
+def has_override_cores(session=None):
+  session = get_session(session)
+  return hasattr(session, '_override_cores')
+
+def get_override_cores(session=None):
+  session = get_session(session)
+  if hasattr(session, '_override_cores'):
+    return session._override_cores
+
+def device_for_tpu_core(task=0, core=0, job_name="tpu_worker"):
+  return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job_name, task, core)
 
 def device(name=''):
+  if has_override_device():
+    return nullcontext()
+  if has_override_cores():
+    if name is None:
+      return tf.device(name)
+    if name.startswith('/gpu:'):
+      i = int(name.split(':', 1)[-1])
+      return tf.device(get_cores()[i].name)
+    if name.startswith('/tpu:'):
+      i = int(name.split(':', 1)[-1])
+      return tf.device(device_for_tpu_core(core=i))
+    if name.startswith('/cpu:'):
+      i = int(name.split(':', 1)[-1])
+      return tf.device(get_cpus()[i].name)
+    return nullcontext()
   if name is None:
     return tf.device(None)
   if 'gpu' in name:
@@ -653,4 +959,20 @@ def device(name=''):
   if 'cpu' in name:
     return tf.device(name)
   return nullcontext()
+
+def tuples(l, n=2):
+  r = []
+  for i in range(0, len(l), n):
+    r.append(l[i:i+n])
+  return r
+
+import hashlib
+
+def sha256hex(x):
+  if isinstance(x, str):
+    x = x.encode('utf8')
+  return hashlib.sha224(x).hexdigest()
+
+def sha256label(x):
+  return [int(x, 16) / 255 * 2 - 1 for x in tuples(sha256hex(x))]
 
