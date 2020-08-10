@@ -34,7 +34,7 @@ def run(dataset, resolution, result_dir, DiffAugment, num_gpus, batch_size, tota
     tf_config = {'rnd.np_random_seed': 1000}                                   # Options for tflib.init_tf().
 
     # preprocess dataset into tfrecords
-    dataset = dataset_tool.create_dataset(dataset, resolution)
+    # dataset = dataset_tool.create_dataset(dataset, resolution)
 
     train.total_kimg = total_kimg
     train.mirror_augment = mirror_augment

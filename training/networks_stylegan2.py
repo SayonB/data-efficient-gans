@@ -34,7 +34,7 @@ def get_weight(shape, gain=1, use_wscale=True, lrmul=1, weight_var='weight'):
 
     # Create variable.
     init = tf.initializers.random_normal(0, init_std)
-    return tf.get_variable(weight_var, shape=shape, initializer=init) * runtime_coef
+    return tf.get_variable(weight_var, shape=shape, initializer=init, use_resource=True) * runtime_coef
 
 # ----------------------------------------------------------------------------
 # Fully-connected layer.
@@ -51,14 +51,14 @@ def dense_layer(x, fmaps, gain=1, use_wscale=True, lrmul=1, weight_var='weight')
 # Convolution layer with optional upsampling or downsampling.
 
 
-def conv2d_layer(x, fmaps, kernel, up=False, down=False, resample_kernel=None, gain=1, use_wscale=True, lrmul=1, weight_var='weight', impl='cuda'):
+def conv2d_layer(x, fmaps, kernel, up=False, down=False, resample_kernel=None, gain=1, use_wscale=True, lrmul=1, weight_var='weight'):
     assert not (up and down)
     assert kernel >= 1 and kernel % 2 == 1
     w = get_weight([kernel, kernel, x.shape[1].value, fmaps], gain=gain, use_wscale=use_wscale, lrmul=lrmul, weight_var=weight_var)
     if up:
-        x = upsample_conv_2d(x, tf.cast(w, x.dtype), data_format='NCHW', k=resample_kernel, impl=impl)
+        x = upsample_conv_2d(x, tf.cast(w, x.dtype), data_format='NCHW', k=resample_kernel)
     elif down:
-        x = conv_downsample_2d(x, tf.cast(w, x.dtype), data_format='NCHW', k=resample_kernel, impl=impl)
+        x = conv_downsample_2d(x, tf.cast(w, x.dtype), data_format='NCHW', k=resample_kernel)
     else:
         x = tf.nn.conv2d(x, tf.cast(w, x.dtype), data_format='NCHW', strides=[1, 1, 1, 1], padding='SAME')
     return x
@@ -69,7 +69,7 @@ def conv2d_layer(x, fmaps, kernel, up=False, down=False, resample_kernel=None, g
 
 def apply_bias_act(x, act='linear', alpha=None, gain=None, lrmul=1, bias_var='bias', impl='cuda'):
     b = tf.get_variable(bias_var, shape=[x.shape[1]], initializer=tf.initializers.zeros()) * lrmul
-    return fused_bias_act(x, b=tf.cast(b, x.dtype), act=act, alpha=alpha, gain=gain, impl=impl)
+    return fused_bias_act(x, b=tf.cast(b, x.dtype), act=act, alpha=alpha, gain=gain)
 
 # ----------------------------------------------------------------------------
 # Naive upsampling (nearest neighbor) and downsampling (average pooling).
@@ -199,8 +199,8 @@ def G_main(
         components.mapping = tflib.Network('G_mapping', func_name=globals()[mapping_func], dlatent_broadcast=num_layers, **kwargs)
 
     # Setup variables.
-    lod_in = tf.get_variable('lod', initializer=np.float32(0), trainable=False)
-    dlatent_avg = tf.get_variable('dlatent_avg', shape=[dlatent_size], initializer=tf.initializers.zeros(), trainable=False)
+    lod_in = tf.get_variable('lod', initializer=np.float32(0), trainable=False, use_resource=True)
+    dlatent_avg = tf.get_variable('dlatent_avg', shape=[dlatent_size], initializer=tf.initializers.zeros(), trainable=False, use_resource=True)
 
     # Evaluate mapping network.
     dlatents = components.mapping.get_output_for(latents_in, labels_in, is_training=is_training, **kwargs)
@@ -271,7 +271,6 @@ def G_mapping(
         mapping_nonlinearity='lrelu',      # Activation function: 'relu', 'lrelu', etc.
         normalize_latents=True,         # Normalize latent vectors (Z) before feeding them to the mapping layers?
         dtype='float32',    # Data type to use for activations and outputs.
-        impl='cuda',
         **_kwargs):                             # Ignore unrecognized keyword args.
 
     act = mapping_nonlinearity
@@ -299,7 +298,7 @@ def G_mapping(
     for layer_idx in range(mapping_layers):
         with tf.variable_scope('Dense%d' % layer_idx):
             fmaps = dlatent_size if layer_idx == mapping_layers - 1 else mapping_fmaps
-            x = apply_bias_act(dense_layer(x, fmaps=fmaps, lrmul=mapping_lrmul), act=act, lrmul=mapping_lrmul, impl=impl)
+            x = apply_bias_act(dense_layer(x, fmaps=fmaps, lrmul=mapping_lrmul), act=act, lrmul=mapping_lrmul)
 
     # Broadcast.
     if dlatent_broadcast is not None:
@@ -334,6 +333,8 @@ def G_synthesis_stylegan2(
         impl='cuda',
         **_kwargs):                         # Ignore unrecognized keyword args.
 
+    num_channels = int(os.environ["NUM_CHANNELS"]) if "NUM_CHANNELS" in os.environ else num_channels
+
     resolution_log2 = int(np.ceil(np.log2(resolution)))
     pad = (2 ** resolution_log2 - resolution) // 2
     def nf(stage): return np.clip(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_min, fmap_max)
@@ -351,18 +352,18 @@ def G_synthesis_stylegan2(
     for layer_idx in range(num_layers - 1):
         res = (layer_idx + 5) // 2
         shape = [1, 1, 2**res, 2**res]
-        noise_inputs.append(tf.get_variable('noise%d' % layer_idx, shape=shape, initializer=tf.initializers.random_normal(), trainable=False))
+        noise_inputs.append(tf.get_variable('noise%d' % layer_idx, shape=shape, initializer=tf.initializers.random_normal(), trainable=False, use_resource=True))
 
     # Single convolution layer with all the bells and whistles.
     def layer(x, layer_idx, fmaps, kernel, up=False):
-        x = modulated_conv2d_layer(x, dlatents_in[:, layer_idx], fmaps=fmaps, kernel=kernel, up=up, resample_kernel=resample_kernel, fused_modconv=fused_modconv, impl=impl)
+        x = modulated_conv2d_layer(x, dlatents_in[:, layer_idx], fmaps=fmaps, kernel=kernel, up=up, resample_kernel=resample_kernel, fused_modconv=fused_modconv)
         if randomize_noise:
             noise = tf.random_normal([tf.shape(x)[0], 1, x.shape[2], x.shape[3]], dtype=x.dtype)
         else:
             noise = tf.cast(noise_inputs[layer_idx], x.dtype)
-        noise_strength = tf.get_variable('noise_strength', shape=[], initializer=tf.initializers.zeros())
+        noise_strength = tf.get_variable('noise_strength', shape=[], initializer=tf.initializers.zeros(), use_resource=True)
         x += noise * tf.cast(noise_strength, x.dtype)
-        return apply_bias_act(x, act=act, impl=impl)
+        return apply_bias_act(x, act=act)
 
     # Building blocks for main layers.
     def block(x, res):  # res = 3..resolution_log2
@@ -373,13 +374,13 @@ def G_synthesis_stylegan2(
             x = layer(x, layer_idx=res * 2 - 4, fmaps=nf(res - 1), kernel=3)
         if architecture == 'resnet':
             with tf.variable_scope('Skip'):
-                t = conv2d_layer(t, fmaps=nf(res - 1), kernel=1, up=True, resample_kernel=resample_kernel, impl=impl)
+                t = conv2d_layer(t, fmaps=nf(res - 1), kernel=1, up=True, resample_kernel=resample_kernel)
                 x = (x + t) * (1 / np.sqrt(2))
         return x
 
     def upsample(y):
         with tf.variable_scope('Upsample'):
-            return upsample_2d(y, k=resample_kernel, impl=impl)
+            return upsample_2d(y, k=resample_kernel)
 
     def torgb(x, y, res):  # res = 2..resolution_log2
         with tf.variable_scope('ToRGB'):
@@ -390,7 +391,7 @@ def G_synthesis_stylegan2(
     y = None
     with tf.variable_scope('4x4'):
         with tf.variable_scope('Const'):
-            x = tf.get_variable('const', shape=[1, nf(1), 4, 4], initializer=tf.initializers.random_normal())
+            x = tf.get_variable('const', shape=[1, nf(1), 4, 4], initializer=tf.initializers.random_normal(), use_resource=True)
             x = tf.tile(tf.cast(x, dtype), [tf.shape(dlatents_in)[0], 1, 1, 1])
         with tf.variable_scope('Conv'):
             x = layer(x, layer_idx=0, fmaps=nf(1), kernel=3)
@@ -438,6 +439,8 @@ def D_stylegan2(
         avg_pooling=False,
         **_kwargs):                         # Ignore unrecognized keyword args.
 
+    num_channels = int(os.environ["NUM_CHANNELS"]) if "NUM_CHANNELS" in os.environ else num_channels
+
     resolution_log2 = int(np.ceil(np.log2(resolution)))
     pad = (2 ** resolution_log2 - resolution) // 2
     def nf(stage): return np.clip(int(fmap_base / (2.0 ** (stage * fmap_decay))), fmap_min, fmap_max)
@@ -450,24 +453,24 @@ def D_stylegan2(
     # Building blocks for main layers.
     def fromrgb(x, y, res):  # res = 2..resolution_log2
         with tf.variable_scope('FromRGB'):
-            t = apply_bias_act(conv2d_layer(y, fmaps=nf(res - 1), kernel=1, impl=impl), act=act, impl=impl)
+            t = apply_bias_act(conv2d_layer(y, fmaps=nf(res - 1), kernel=1), act=act)
             return t if x is None else x + t
 
     def block(x, res):  # res = 2..resolution_log2
         t = x
         with tf.variable_scope('Conv0'):
-            x = apply_bias_act(conv2d_layer(x, fmaps=nf(res - 1), kernel=3, impl=impl), act=act, impl=impl)
+            x = apply_bias_act(conv2d_layer(x, fmaps=nf(res - 1), kernel=3), act=act)
         with tf.variable_scope('Conv1_down'):
-            x = apply_bias_act(conv2d_layer(x, fmaps=nf(res - 2), kernel=3, down=True, resample_kernel=resample_kernel, impl=impl), act=act, impl=impl)
+            x = apply_bias_act(conv2d_layer(x, fmaps=nf(res - 2), kernel=3, down=True, resample_kernel=resample_kernel), act=act)
         if architecture == 'resnet':
             with tf.variable_scope('Skip'):
-                t = conv2d_layer(t, fmaps=nf(res - 2), kernel=1, down=True, resample_kernel=resample_kernel, impl=impl)
+                t = conv2d_layer(t, fmaps=nf(res - 2), kernel=1, down=True, resample_kernel=resample_kernel)
                 x = (x + t) * (1 / np.sqrt(2))
         return x
 
     def downsample(y):
         with tf.variable_scope('Downsample'):
-            return downsample_2d(y, k=resample_kernel, impl=impl)
+            return downsample_2d(y, k=resample_kernel)
 
     # Main layers.
     x = None
@@ -488,17 +491,17 @@ def D_stylegan2(
             with tf.variable_scope('MinibatchStddev'):
                 x = minibatch_stddev_layer(x, mbstd_group_size, mbstd_num_features)
         with tf.variable_scope('Conv'):
-            x = apply_bias_act(conv2d_layer(x, fmaps=nf(1), kernel=3, impl=impl), act=act, impl=impl)
+            x = apply_bias_act(conv2d_layer(x, fmaps=nf(1), kernel=3), act=act)
         if avg_pooling:
             x = tf.reduce_mean(x, axis=[2, 3])
         with tf.variable_scope('Dense0'):
-            x = apply_bias_act(dense_layer(x, fmaps=nf(0)), act=act, impl=impl)
+            x = apply_bias_act(dense_layer(x, fmaps=nf(0)), act=act)
 
     with tf.variable_scope('Output'):
         if label_size > 0:
-            scores_out = apply_bias_act(dense_layer(x, fmaps=label_size), impl=impl)
+            scores_out = apply_bias_act(dense_layer(x, fmaps=label_size))
         else:
-            scores_out = tf.squeeze(apply_bias_act(dense_layer(x, fmaps=1), impl=impl), axis=1)
+            scores_out = tf.squeeze(apply_bias_act(dense_layer(x, fmaps=1)), axis=1)
 
     assert scores_out.dtype == tf.as_dtype(dtype)
     scores_out = tf.identity(scores_out, name='scores_out')

@@ -7,13 +7,14 @@
 """Miscellaneous helper utils for Tensorflow."""
 
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = os.environ.get('TF_CPP_MIN_LOG_LEVEL', '0')
 import numpy as np
 import tensorflow as tf
 import tflex
 
 # Silence deprecation warnings from TensorFlow 1.13 onwards
 import logging
-logging.getLogger('tensorflow').setLevel(logging.ERROR)
+logging.getLogger('tensorflow').setLevel(logging.DEBUG)
 import tensorflow.contrib   # requires TensorFlow 1.x!
 tf.contrib = tensorflow.contrib
 
@@ -153,6 +154,7 @@ def create_session(config_dict: dict = None, force_as_default: bool = False) -> 
             setattr(obj, fields[-1], value)
 
     # Create session.
+    config_proto.allow_soft_placement = True
     session = tflex.Session(config=config_proto)
     if force_as_default:
         # pylint: disable=protected-access
@@ -179,14 +181,15 @@ def init_uninitialized_vars(target_vars: List[tf.Variable] = None) -> None:
         for var in target_vars:
             assert is_tf_expression(var)
 
-            try:
-                tf.get_default_graph().get_tensor_by_name(var.name.replace(":0", "/IsVariableInitialized:0"))
-            except KeyError:
-                # Op does not exist => variable may be uninitialized.
-                test_vars.append(var)
+            with tflex.lock:
+                try:
+                    tf.get_default_graph().get_tensor_by_name(var.name.replace(":0", "/IsVariableInitialized:0"))
+                except KeyError:
+                    # Op does not exist => variable may be uninitialized.
+                    test_vars.append(var)
 
-                with absolute_name_scope(var.name.split(":")[0]):
-                    test_ops.append(tf.is_variable_initialized(var))
+                    with absolute_name_scope(var.name.split(":")[0]):
+                        test_ops.append(tf.is_variable_initialized(var))
 
     init_vars = [var for var, inited in zip(test_vars, run(test_ops)) if not inited]
     run([var.initializer for var in init_vars])
@@ -205,15 +208,27 @@ def set_vars(var_to_value_dict: dict) -> None:
     for var, value in var_to_value_dict.items():
         assert is_tf_expression(var)
 
-        try:
-            setter = tf.get_default_graph().get_tensor_by_name(var.name.replace(":0", "/setter:0"))  # look for existing op
-        except KeyError:
-            with absolute_name_scope(var.name.split(":")[0]):
-                with tf.control_dependencies(None):  # ignore surrounding control_dependencies
-                    setter = tf.assign(var, tf.placeholder(var.dtype, var.shape, "new_value"), name="setter")  # create new setter
+        with tflex.lock:
+            if isinstance(value, tf.Variable):
+                try:
+                    setter = tf.get_default_graph().get_tensor_by_name(var.name.replace(":0", "/setter_variable:0"))  # look for existing op
+                except KeyError:
+                    with absolute_name_scope(var.name.split(":")[0]):
+                        with tf.control_dependencies(None):  # ignore surrounding control_dependencies
+                            setter = tf.group(tf.assign(var, value), name="setter_variable")  # create new setter
 
-        ops.append(setter)
-        feed_dict[setter.op.inputs[1]] = value
+                ops.append(setter)
+            else:
+                try:
+                    setter = tflex.get_default_graph().get_tensor_by_name(var.name.replace(":0", "/setter:0"))  # look for existing op
+                except KeyError:
+                    with absolute_name_scope(var.name.split(":")[0]):
+                        with tf.control_dependencies(None):  # ignore surrounding control_dependencies
+                            assigner = tf.assign(var, tf.placeholder(var.dtype, var.shape, "new_value"))
+                            setter = tf.group(assigner, name="setter")  # create new setter
+
+                ops.append(setter)
+                feed_dict[assigner.op.inputs[1]] = value
 
     run(ops, feed_dict)
 
@@ -226,6 +241,15 @@ def create_var_with_large_initial_value(initial_value: np.ndarray, *args, **kwar
     var = tf.Variable(zeros, *args, **kwargs)
     set_vars({var: initial_value})
     return var
+
+def create_var_with_large_initial_value2(initial_value: np.ndarray, *args, **kwargs):
+    """Create tf.Variable with large initial value without bloating the tf graph."""
+    assert_tf_initialized()
+    assert isinstance(initial_value, np.ndarray)
+    zeros = tf.zeros(initial_value.shape, initial_value.dtype)
+    var = tf.Variable(zeros, *args, **kwargs)
+    return var, tf.assign(var, initial_value)
+
 
 
 def convert_images_from_uint8(images, drange=[-1,1], nhwc_to_nchw=False):
