@@ -198,18 +198,13 @@ class TFRecordDataset:
         return np.zeros([minibatch_size], dtype=tf.int32)
 
     # Parse individual image from a tfrecords file into TensorFlow expression.
-    def parse_tfrecord_tf(self, record, resize=False):
+    @staticmethod
+    def parse_tfrecord_tf(record):
         features = tf.parse_single_example(record, features={
             'shape': tf.FixedLenFeature([3], tf.int64),
             'data': tf.FixedLenFeature([], tf.string)})
         data = tf.decode_raw(features['data'], tf.uint8)
-        data = tf.reshape(data, features['shape'])
-        if resize:
-            image = tf.transpose(data, [1, 2, 0])
-            image = tf.image.resize(image, self.shape[1:])
-            data = tf.transpose(image, [2, 0, 1])
-        data.set_shape(self.shape)
-        return data
+        return tf.reshape(data, features['shape'])
 
     def parse_tfdataset_tf(self, record, resize=False):
         image, label = record['image'], tf.cast(record['label'], tf.int32)
