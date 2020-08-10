@@ -1,111 +1,149 @@
-# Data-Efficient GANs with DiffAugment
+# DiffAugment for StyleGAN2
 
-### [project](https://data-efficient-gans.mit.edu/) | [paper](https://arxiv.org/pdf/2006.10738)
+This repo is implemented upon and has the same dependencies as the official [StyleGAN2 repo](https://github.com/NVlabs/stylegan2). Specifically,
 
-<img src="imgs/interp.gif"/>
+- TensorFlow 1.14 or 1.15 with GPU support.
+- `tensorflow-datasets` version <= 2.1.0 should be installed to run on CIFAR, e.g., `pip install tensorflow-datasets==2.1.0`.
+- We recommend using 4 or 8 GPUs with at least 12 GB of DRAM for training.
+- If you are facing problems with `nvcc` (when building custom ops of StyleGAN2), this can be circumvented by specifying `--impl=ref` in training at the cost of a slightly longer training time.
 
-*Generated using only 100 images of Obama, grumpy cats, pandas, the Bridge of Sighs, the Medici Fountain, the Temple of Heaven, without pre-training.*
+## Generating an Interpolation Video
 
-**[NEW!]** Our [Colab tutorial](https://colab.research.google.com/gist/zsyzzsoft/5fbb71b9bf9a3217576bebae5de46fc2/data-efficient-gans.ipynb) is released! [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/zsyzzsoft/5fbb71b9bf9a3217576bebae5de46fc2/data-efficient-gans.ipynb)
+<img src="../imgs/interp.gif"/>
 
-**[NEW!]** FFHQ training is supported! See the [DiffAugment-stylegan2](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-stylegan2#FFHQ) README.
-
-**[NEW!]** Time to generate 100-shot interpolation videos with [generate_gif.py](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-stylegan2/generate_gif.py)!
-
-**[NEW!]** Our [DiffAugment-biggan-imagenet](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-biggan-imagenet) repo (for TPU training) is released!
-
-**[NEW!]** Our [DiffAugment-biggan-cifar](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-biggan-cifar) PyTorch repo is released!
-
-This repository contains our implementation of Differentiable Augmentation (DiffAugment) in both PyTorch and TensorFlow. It can be used to significantly improve the data efficiency for GAN training. We have provided the TensorFlow code of [DiffAugment-stylegan2](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-stylegan2), the PyTorch code of [DiffAugment-biggan-cifar](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-biggan-cifar) for GPU training, and the TensorFlow code of [DiffAugment-biggan-imagenet](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-biggan-imagenet) for TPU training.
-
-<img src="imgs/few_shot-comparison.jpg" width="1000px"/>
-
-*Few-shot generation without pre-training. With DiffAugment, our model can generate high-fidelity images using only 100 Obama portraits, grumpy cats, or pandas from our collected 100-shot datasets, 160 cats or 389 dogs from the AnimalFace dataset at 256×256 resolution.*
-
-<img src="imgs/cifar10-results.jpg" width="1000px"/>
-
-*Unconditional generation results on CIFAR-10. StyleGAN2’s performance drastically degrades given less training data. With DiffAugment, we are able to roughly match its FID and outperform its Inception Score (IS) using only **20%** training data.*
-
-Differentiable Augmentation for Data-Efficient GAN Training<br>
-[Shengyu Zhao](https://scholar.google.com/citations?user=gLCdw70AAAAJ), [Zhijian Liu](http://zhijianliu.com/), [Ji Lin](http://linji.me/), [Jun-Yan Zhu](https://www.cs.cmu.edu/~junyanz/), and [Song Han](https://songhan.mit.edu/)<br>
-MIT, Tsinghua University, Adobe Research<br>
-[arXiv](https://arxiv.org/pdf/2006.10738.pdf)
-
-
-## Overview
-<img src="imgs/method.jpg" width="1000px"/>
-
-*Overview of DiffAugment for updating D (left) and G (right). DiffAugment applies the augmentation T to both the real sample x and the generated output G(z). When we update G, gradients need to be back-propagated through T (iii), which requires T to be differentiable w.r.t. the input.*
-
-## Training and Generation with 100 Images [![](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/zsyzzsoft/5fbb71b9bf9a3217576bebae5de46fc2/data-efficient-gans.ipynb)
-
-To generate an interpolation video using our pre-trained models:
+Run the following command to generate an interpolation video:
 
 ```bash
-cd DiffAugment-stylegan2
-python generate_gif.py -r mit-han-lab:DiffAugment-stylegan2-100-shot-obama.pkl -o obama.gif
+python generate_gif.py --resume=WHICH_MODEL --output=OUTPUT_FILENAME
 ```
 
-or to train a new model:
+`WHICH_MODEL` specifies the path of a checkpoint or any pre-trained models in the tables below, e.g., `mit-han-lab:DiffAugment-stylegan2-100-shot-obama.pkl`.
+
+## CIFAR-10 and CIFAR-100
+
+To run the CIFAR experiments with 100% data:
 
 ```bash
-python run_few_shot.py --dataset=100-shot-obama --num-gpus=4
+python run_cifar.py --dataset=WHICH_DATASET --num-gpus=NUM_GPUS --DiffAugment=color,cutout
 ```
 
-You may also try out `100-shot-grumpy_cat`, `100-shot-panda`, `100-shot-bridge_of_sighs`, `100-shot-medici_fountain`, `100-shot-temple_of_heaven`, `100-shot-wuzhen`, or the folder containing your own training images. Please refer to the [DiffAugment-stylegan2](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-stylegan2#few-shot-generation) README for the dependencies and details.
+`WHICH_DATASET` specifies either `cifar10` or `cifar100` (default to `cifar10`). `NUM_GPUS` specifies the number of GPUs to use; we recommend using 4 or 8 GPUs to replicate our results. The training typically takes around 2 days. Set `--DiffAugment=""` to run the baseline model.
 
-## DiffAugment for StyleGAN2
+To run the CIFAR experiments with partial data:
 
-To run *StyleGAN2 + DiffAugment* for unconditional generation on few-shot generation, CIFAR, and FFHQ, please refer to the [DiffAugment-stylegan2](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-stylegan2) README.
-
-## DiffAugment for BigGAN
-
-Please refer to the [DiffAugment-biggan-cifar](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-biggan-cifar) README to run *BigGAN + DiffAugment* for conditional generation on CIFAR (using GPUs), and the [DiffAugment-biggan-imagenet](https://github.com/mit-han-lab/data-efficient-gans/tree/master/DiffAugment-biggan-imagenet) README to run on ImageNet (using TPUs).
-
-## Using DiffAugment for Your Own Training
-
-To help you use DiffAugment in your own codebase, we provide portable DiffAugment operations of both TensorFlow and PyTorch versions in [DiffAugment_tf.py](https://github.com/mit-han-lab/data-efficient-gans/blob/master/DiffAugment_tf.py) and [DiffAugment_pytorch.py](https://github.com/mit-han-lab/data-efficient-gans/blob/master/DiffAugment_pytorch.py). Generally, DiffAugment can be easily adopted in any model by substituting every *D(x)* with *D(T(x))*, where *x* can be real images or fake images, *D* is the discriminator, and *T* is the DiffAugment operation. For example,
-
-```python
-from DiffAugment_pytorch import DiffAugment
-# from DiffAugment_tf import DiffAugment
-policy = 'color,translation,cutout' # If your dataset is as small as ours (e.g.,
-# 100 images), we recommend using the strongest Color + Translation + Cutout.
-# For large datasets, try using a subset of transformations in ['color', 'translation', 'cutout'].
-# Welcome to discover more DiffAugment transformations!
-
-...
-# Training loop: update D
-reals = sample_real_images() # a batch of real images
-z = sample_latent_vectors()
-fakes = Generator(z) # a batch of fake images
-real_scores = Discriminator(DiffAugment(reals, policy=policy))
-fake_scores = Discriminator(DiffAugment(fakes, policy=policy))
-# Calculating D's loss based on real_scores and fake_scores...
-...
-
-...
-# Training loop: update G
-z = sample_latent_vectors()
-fakes = Generator(z) # a batch of fake images
-fake_scores = Discriminator(DiffAugment(fakes, policy=policy))
-# Calculating G's loss based on fake_scores...
-...
+```bash
+python run_cifar.py --dataset=WHICH_DATASET --num-samples=NUM_SAMPLES --num-gpus=NUM_GPUS --DiffAugment=color,translation,cutout
 ```
 
-## Citation
+`WHICH_DATASET` specifies either `cifar10` or `cifar100` (default to `cifar10`). `NUM_SAMPLES` specifies the number of training samples to use, e.g., `5000` for 10% data or `10000` for 20% data. `NUM_GPUS` specifies the number of GPUs to use; we recommend using 4 or 8 GPUs to replicate our results. Set `--DiffAugment=""` to run the baseline model.
 
-If you find this code helpful, please cite our paper:
-```
-@article{zhao2020diffaugment,
-  title={Differentiable Augmentation for Data-Efficient GAN Training},
-  author={Zhao, Shengyu and Liu, Zhijian and Lin, Ji and Zhu, Jun-Yan and Han, Song},
-  journal={arXiv preprint arXiv:2006.10738},
-  year={2020}
-}
+### Pre-Trained Models and Evaluation
+
+To evaluate a model on CIFAR-10 or CIFAR-100, run the following command:
+
+```bash
+python run_cifar.py --dataset=WHICH_DATASET --resume=WHICH_MODEL --eval
 ```
 
-## Acknowledgements
+Here, `WHICH_DATASET` specifies either `cifar10` or `cifar100` (default to `cifar10`); `WHICH_MODEL` specifies the path of a checkpoint, or a pre-trained model in the following list, which will be automatically downloaded:
 
-We thank NSF Career Award #1943349, MIT-IBM Watson AI Lab, Google, Adobe, and Sony for supporting this research. We thank TensorFlow Research Cloud for supporting this research with Cloud TPUs. We thank William S. Peebles and Yijun Li for helpful comments.
+| Model name | Dataset | is10k | fid10k |
+| --- | --- | --- | --- |
+| `mit-han-lab:stylegan2-cifar10.pkl` | `cifar10` | 9.18 | 11.07 |
+| `mit-han-lab:DiffAugment-stylegan2-cifar10.pkl` | `cifar10` | **9.40** | **9.89** |
+| `mit-han-lab:stylegan2-cifar10-0.2.pkl` | `cifar10` (20% data) | 8.28 | 23.08 |
+| `mit-han-lab:DiffAugment-stylegan2-cifar10-0.2.pkl` | `cifar10` (20% data) | **9.21** | **12.15** |
+| `mit-han-lab:stylegan2-cifar10-0.1.pkl` | `cifar10` (10% data) | 7.33 | 36.02 |
+| `mit-han-lab:DiffAugment-stylegan2-cifar10-0.1.pkl` | `cifar10` (10% data) | **8.84** | **14.50** |
+| `mit-han-lab:stylegan2-cifar100.pkl` | `cifar100` | 9.51 | 16.54 |
+| `mit-han-lab:DiffAugment-stylegan2-cifar100.pkl` | `cifar100` | **10.04** | **15.22** |
+| `mit-han-lab:stylegan2-cifar100-0.2.pkl` | `cifar100` (20% data) | 7.86 | 32.30 |
+| `mit-han-lab:DiffAugment-stylegan2-cifar100-0.2.pkl` | `cifar100` (20% data) | **9.82** | **16.65** |
+| `mit-han-lab:stylegan2-cifar100-0.1.pkl` | `cifar100` (10% data) | 7.01 | 45.87 |
+| `mit-han-lab:DiffAugment-stylegan2-cifar100-0.1.pkl` | `cifar100` (10% data) | **9.06** | **20.75** |
 
+The evaluation results of the pre-trained models should be close to these numbers. Specify `--num-repeats=REPEATS` to compute means and standard deviations over multiple evaluation runs. A standard deviation of less than 1% relatively is expected.
+
+## FFHQ
+
+The NVIDIA's FFHQ dataset can be downloaded [here](https://drive.google.com/drive/folders/1M24jfI-Ylb-k2EGhELSnxssWi9wGUokg). If you want to run at 256x256 resolution for example, only `ffhq-r08.tfrecords` needs to be downloaded. Pass the folder containing the `.tfrecords` file to `PATH_TO_THE_TFRECORDS_FOLDER` below:
+
+```bash
+python run_ffhq.py --dataset=PATH_TO_THE_TFRECORDS_FOLDER --num-samples=NUM_SAMPLES --num-gpus=NUM_GPUS --DiffAugment=color,translation,cutout
+```
+
+If there are multiple `.tfrecords` files in the folder, the one with the highest resolution will be used.
+
+### Pre-Trained Models and Evaluation
+
+Run the following command to evaluate a model on the FFHQ dataset:
+
+```bash
+python run_ffhq.py --dataset=PATH_TO_THE_TFRECORDS_FOLDER --resume=WHICH_MODEL --num-gpus=NUM_GPUS --eval
+```
+
+Here, `PATH_TO_THE_TFRECORDS_FOLDER` specifies the folder containing the `tfrecords` file. `WHICH_MODEL` specifies the path of a checkpoint, or a pre-trained model in the list below, which will be automatically downloaded. The pre-trained models are run at 256x256 resolution using 8 GPUs. We apply the strongest *Color + Translation + Cutout* DiffAugment to all baselines, which significantly gains the performance when training with partial data:
+
+| Model name                                                  | Dataset               | fid50k-train |
+| ----------------------------------------------------------- | --------------------- | ----------- |
+| `mit-han-lab:stylegan2-ffhq.pkl`                | FFHQ (full, 70k samples) | **3.81** |
+| `mit-han-lab:DiffAugment-stylegan2-ffhq.pkl`    | FFHQ (full, 70k samples) | 4.24 |
+| `mit-han-lab:stylegan2-ffhq-30k.pkl`            | FFHQ (30k samples)  | 6.16 |
+| `mit-han-lab:DiffAugment-stylegan2-ffhq-30k.pkl` | FFHQ (30k samples)  | **5.05** |
+| `mit-han-lab:stylegan2-ffhq-10k.pkl`            | FFHQ (10k samples)  | 14.75 |
+| `mit-han-lab:DiffAugment-stylegan2-ffhq-10k.pkl` | FFHQ (10k samples)  | **7.86** |
+| `mit-han-lab:stylegan2-ffhq-5k.pkl`             | FFHQ (5k samples)   | 26.60 |
+| `mit-han-lab:DiffAugment-stylegan2-ffhq-5k.pkl` | FFHQ (5k samples)   | **10.45** |
+| `mit-han-lab:stylegan2-ffhq-1k.pkl`             | FFHQ (1k samples)   | 62.16 |
+| `mit-han-lab:DiffAugment-stylegan2-ffhq-1k.pkl` | FFHQ (1k samples)   | **25.66** |
+
+## Few-Shot Generation
+
+<img src="../imgs/few_shot-interp.jpg" width="1000px"/>
+
+To run the few-shot generation experiments on the 100-shot datasets:
+
+```bash
+python run_few_shot.py --dataset=WHICH_DATASET --num-gpus=NUM_GPUS --DiffAugment=color,translation,cutout
+```
+
+or the following command to run on the AnimalFace datasets (with a longer training length):
+
+```bash
+python run_few_shot.py --dataset=WHICH_DATASET --num-gpus=NUM_GPUS --DiffAugment=color,translation,cutout --total-kimg=500
+```
+
+`WHICH_DATASET` specifies `100-shot-obama`, `100-shot-grumpy_cat`, `100-shot-panda`, `100-shot-bridge_of_sighs`, `100-shot-medici_fountain`, `100-shot-temple_of_heaven`, `100-shot-wuzhen`, `AnimalFace-cat`, or `AnimalFace-dog`, which will be automatically downloaded, or the path of a folder containing your own training images. `NUM_GPUS` specifies the number of GPUs to use; we recommend using 4 or 8 GPUs to replicate our results. The training typically takes several hours. Set `--DiffAugment=""` to run the baseline model. Specify `--resolution=RESOLUTION` to run at a different resolution from the default `256`. You may also fine-tune from an FFHQ pre-trained model listed above, e.g., by specifying `--resume=mit-han-lab:DiffAugment-stylegan2-ffhq.pkl --fmap-base=8192`.
+
+### Preparing Your Own Datasets
+
+<img src="../imgs/prof_han.jpg" width="1000px"/>
+
+Our method can generate good results using a small number of samples, e.g., 100 images. You may create a new dataset at such scale easily, but note that the generated results may be sensitive to the quality of the training samples. You may wish to crop the raw images and discard some bad training samples. After putting all images into a single folder, pass it to `WHICH_DATASET` in `run_few_shot.py`, the images will be resized to the specified resolution if necessary, and then enjoy the outputs! Note that,
+
+- The training length (default to 300k images) may be increased for larger datasets; note that there may be overfitting issues if the training is too long.
+- The cached files will be stored in the same folder with the training images. If the training images in your folder is *changed* after some run, please manually clean the cached files, `*.tfrecords` and `*.pkl`, from your image folder before rerun.
+
+### Pre-Trained Models and Evaluation
+
+To evaluate a model on a few-shot dataset, run the following command:
+
+```bash
+python run_few_shot.py --dataset=WHICH_DATASET --resume=WHICH_MODEL --eval
+```
+
+Here, `WHICH_DATASET` specifies the folder containing the training images, or one of our pre-defined datasets, including `100-shot-obama`, `100-shot-grumpy_cat`, `100-shot-panda`, `100-shot-bridge_of_sighs`, `100-shot-medici_fountain`, `100-shot-temple_of_heaven`, `100-shot-wuzhen`, `AnimalFace-cat`, and `AnimalFace-dog`, which will be automatically downloaded. `WHICH_MODEL` specifies the path of a checkpoint, or a pre-trained model in the following list, which will be automatically downloaded:
+| Model name | Dataset | fid5k-train |
+| --- | --- | --- |
+| `mit-han-lab:stylegan2-100-shot-obama.pkl` | `100-shot-obama` | 80.20 |
+| `mit-han-lab:DiffAugment-stylegan2-100-shot-obama.pkl` | `100-shot-obama` | **46.87** |
+| `mit-han-lab:stylegan2-100-shot-grumpy_cat.pkl` | `100-shot-grumpy_cat` | 48.90 |
+| `mit-han-lab:DiffAugment-stylegan2-100-shot-grumpy_cat.pkl` | `100-shot-grumpy_cat` | **27.08** |
+| `mit-han-lab:stylegan2-100-shot-panda.pkl` | `100-shot-panda` | 34.27 |
+| `mit-han-lab:DiffAugment-stylegan2-100-shot-panda.pkl` | `100-shot-panda` | **12.06** |
+| `mit-han-lab:stylegan2-AnimalFace-cat.pkl` | `AnimalFace-cat` | 71.71 |
+| `mit-han-lab:DiffAugment-stylegan2-AnimalFace-cat.pkl` | `AnimalFace-cat` | **42.44** |
+| `mit-han-lab:stylegan2-AnimalFace-dog.pkl` | `AnimalFace-dog` | 130.19 |
+| `mit-han-lab:DiffAugment-stylegan2-AnimalFace-dog.pkl` | `AnimalFace-dog` | **58.85** |
+
+**[NOTE]** The pre-trained models for few-shot generation are updated on 07/23/2020, with a batch size of 16 instead of 32. To keep up to date, please manually clean the cached models in the `.stylegan2-cache` folder.
