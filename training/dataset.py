@@ -16,6 +16,8 @@ import tensorflow_datasets as tfds
 import dnnlib
 import dnnlib.tflib as tflib
 
+from tensorflow.python.platform import gfile
+
 # ----------------------------------------------------------------------------
 # Dataset class that loads data from tfrecords files.
 
@@ -58,80 +60,45 @@ class TFRecordDataset:
         self._cur_minibatch = -1
 
         # List tfrecords files and inspect their shapes.
-        if self.from_tfrecords:
-            self.name = os.path.basename(self.tfrecord_dir)
-            if resolution is not None:
-                self.name += '-{}'.format(resolution)
-            data_dir = self.tfrecord_dir + '-val' if num_val_images is None and split == 'test' else self.tfrecord_dir
-            tfr_files = sorted(glob.glob(os.path.join(data_dir, '*.tfrecords')))
-            assert len(tfr_files) >= 1
-            tfr_shapes = []
-            for tfr_file in tfr_files:
-                tfr_opt = tf.python_io.TFRecordOptions(tf.python_io.TFRecordCompressionType.NONE)
-                for record in tf.python_io.tf_record_iterator(tfr_file, tfr_opt):
-                    tfr_shapes.append(self.parse_tfrecord_np(record).shape)
-                    break
+        assert gfile.IsDirectory(self.tfrecord_dir)
+        tfr_files = sorted(tf.io.gfile.glob(os.path.join(self.tfrecord_dir, '*.tfrecords')))
+        assert len(tfr_files) >= 1
 
-            # Autodetect label filename.
-            if self.label_file is None:
-                guess = sorted(glob.glob(os.path.join(data_dir, '*.labels')))
-                if len(guess):
-                    self.label_file = guess[0]
-            elif not os.path.isfile(self.label_file):
-                guess = os.path.join(data_dir, self.label_file)
-                if os.path.isfile(guess):
-                    self.label_file = guess
+        # To avoid parsing the entire dataset looking for the max
+        # resolution, just assume that we can extract the LOD level
+        # from the tfrecords file name.
+        tfr_shapes = []
+        lod = -1
+        for tfr_file in tfr_files:
+          match = re.match('.*([0-9]+).tfrecords', tfr_file)
+          if match:
+            level = int(match.group(1))
+            res = 2**level
+            tfr_shapes.append((3, res, res))
 
-            # Determine shape and resolution.
-            target_shape = max(tfr_shapes, key=np.prod)
-            if resolution is not None:
-                for tfr_shape, tfr_file in zip(tfr_shapes, tfr_files):
-                    if max(tfr_shape[1], tfr_shape[2]) == resolution:
-                        target_shape = tfr_shape
-            tfr_file = [tfr_file for tfr_shape, tfr_file in zip(tfr_shapes, tfr_files) if tfr_shape == target_shape][0]
-            tfr_shape = target_shape
-            assert tfr_shape[1] == tfr_shape[2]
+        # Determine shape and resolution.
+        max_shape = max(tfr_shapes, key=np.prod)
+        self.resolution = resolution if resolution is not None else max_shape[1]
+        self.resolution_log2 = int(np.log2(self.resolution))
+        self.shape = [max_shape[0], self.resolution, self.resolution]
+        tfr_lods = [self.resolution_log2 - int(np.log2(shape[1])) for shape in tfr_shapes]
+        assert all(shape[0] == max_shape[0] for shape in tfr_shapes)
+        assert all(shape[1] == shape[2] for shape in tfr_shapes)
+        assert all(shape[1] == self.resolution // (2**lod) for shape, lod in zip(tfr_shapes, tfr_lods))
+        assert all(lod in tfr_lods for lod in range(self.resolution_log2 - 1))
 
-            dset = tf.data.TFRecordDataset(tfr_file, compression_type='', buffer_size=buffer_mb << 20)
-
-            self._np_labels = np.zeros([1 << 25], dtype=np.int32)
-            if self.label_file is not None and max_label_size != 0:
-                self._np_labels = np.load(self.label_file).astype(np.int32)
-                self.label_size = self._np_labels.max() + 1
-                assert self._np_labels.ndim == 1
-                assert np.unique(self._np_labels).shape[0] == self.label_size
-            else:
-                self.label_size = 0
-
-            if num_val_images is not None:
-                if split == 'test':
-                    dset = dset.take(num_val_images)
-                    self._np_labels = self._np_labels[:num_val_images]
-                else:
-                    dset = dset.skip(num_val_images)
-                    self._np_labels = self._np_labels[num_val_images:]
-            if self.num_samples is not None and self._np_labels.shape[0] > self.num_samples:
-                self._np_labels = self._np_labels[:self.num_samples]
-            self.num_samples = self._np_labels.shape[0]
-        else:
-            self.name = self.tfrecord_dir
-            dset, info = tfds.load(name=self.name, data_dir=tfds_data_dir, split=split, with_info=True)
-            if max_label_size != 0:
-                self.label_size = info.features['label'].num_classes
-            else:
-                self.label_size = 0
-            if self.num_samples is None:
-                self.num_samples = info.splits[split].num_examples
-            tfr_shape = [int(tf.compat.v1.data.get_output_shapes(dset)['image'][d]) for d in [2, 0, 1]]
-
-        self.resolution = max(tfr_shape[1], tfr_shape[2])
-        if resolution is not None and resolution != self.resolution:
-            self.resolution = resolution
-            resize = True
-        else:
-            resize = False
-        self.resolution_log2 = int(np.ceil(np.log2(self.resolution)))
-        self.shape = [tfr_shape[0], self.resolution, self.resolution]
+        # Load labels.
+        assert max_label_size == 'full' or max_label_size >= 0
+        self._np_labels = np.zeros([1<<30, 0], dtype=np.float32)
+        if self.label_file is not None and max_label_size != 0:
+            self._np_labels = np.load(self.label_file)
+            assert self._np_labels.ndim == 2
+        if max_label_size != 'full' and self._np_labels.shape[1] > max_label_size:
+            self._np_labels = self._np_labels[:, :max_label_size]
+        if max_images is not None and self._np_labels.shape[0] > max_images:
+            self._np_labels = self._np_labels[:max_images]
+        self.label_size = self._np_labels.shape[1]
+        self.label_dtype = self._np_labels.dtype.name
 
         # Build TF expressions.
         with tf.name_scope('Dataset'), tflex.device('/cpu:0'):
