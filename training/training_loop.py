@@ -525,6 +525,7 @@ def training_loop(
 
     if ema_start_kimg is None:
         ema_start_kimg = G_ema_kimg
+        G_smoothing_kimg = G_ema_kimg
 
     # Initialize dnnlib and TensorFlow.
     tflib.init_tf(tf_config)
@@ -536,7 +537,7 @@ def training_loop(
     input_fn, training_set = get_input_fn(load_training_set, num_gpus, mirror_augment=mirror_augment, drange_net=drange_net)
 
     def model_fn(features, labels, mode, params):
-        nonlocal G_opt_args, D_opt_args, sched_args, G_reg_interval, D_reg_interval, lazy_regularization, G_smoothing_kimg
+        nonlocal G_opt_args, D_opt_args, sched_args, G_reg_interval, D_reg_interval, lazy_regularization
         assert mode == tf.estimator.ModeKeys.TRAIN
         num_channels = features.shape[1].value
         resolution = features.shape[2].value
