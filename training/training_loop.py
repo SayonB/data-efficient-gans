@@ -568,8 +568,8 @@ def training_loop(
         G_opt_args = dict(G_opt_args)
         D_opt_args = dict(D_opt_args)
         sched_args = dict(sched_args)
-        G_opt = tflib.Optimizer(name='TrainG', cross_shard=True, learning_rate=sched_args['G_lrate'], **G_opt_args)
-        D_opt = tflib.Optimizer(name='TrainD', cross_shard=True, learning_rate=sched_args['D_lrate'], **D_opt_args)
+        G_opt = tflib.Optimizer(name='TrainG', cross_shard=True, **G_opt_args)
+        D_opt = tflib.Optimizer(name='TrainD', cross_shard=True, **D_opt_args)
         with tf.name_scope('G_loss'):
             G_loss, G_reg = dnnlib.util.call_func_by_name(Gs=Gs, G=G_gpu, D=D_gpu, opt=G_opt, training_set=training_set,
                                                           minibatch_size=minibatch_gpu_in, **G_loss_args)
@@ -579,8 +579,8 @@ def training_loop(
                                                           labels=labels_read, **D_loss_args)
 
         # Register gradients.
-        G_reg_opt = tflib.Optimizer(name='RegG', share=G_opt, cross_shard=True, learning_rate=sched_args['G_lrate'], **G_opt_args)
-        D_reg_opt = tflib.Optimizer(name='RegD', share=D_opt, cross_shard=True, learning_rate=sched_args['D_lrate'], **D_opt_args)
+        G_reg_opt = tflib.Optimizer(name='RegG', share=G_opt, cross_shard=True, **G_opt_args)
+        D_reg_opt = tflib.Optimizer(name='RegD', share=D_opt, cross_shard=True, **D_opt_args)
         if not lazy_regularization:
             G_reg_loss = None
             D_reg_loss = None
