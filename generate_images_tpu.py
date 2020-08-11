@@ -163,12 +163,12 @@ if __name__ == '__main__':
     if 'G' not in globals():
         with tflex.device('/gpu:0'):
             G = tflib.Network('G', num_channels=num_channels, resolution=resolution,
-                              label_size=label_size, fmap_base=fmap_base, **G_args)
+                              label_size=label_size, **G_args)
             G.print_layers()
             Gs, Gs_finalize = G.clone2('Gs')
             Gs_finalize()
             D = tflib.Network('D', num_channels=num_channels, resolution=resolution,
-                              label_size=label_size, fmap_base=fmap_base, **D_args)
+                              label_size=label_size, **D_args)
             D.print_layers()
 
     grid_size = (2, 2)
