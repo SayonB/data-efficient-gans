@@ -571,9 +571,13 @@ def training_loop(
         G_opt = tflib.Optimizer(name='TrainG', cross_shard=True, **G_opt_args)
         D_opt = tflib.Optimizer(name='TrainD', cross_shard=True, **D_opt_args)
 
-        with tf.name_scope('loss'):
-            G_loss, D_loss, D_reg = dnnlib.util.call_func_by_name(G=G_gpu, D=D_gpu, training_set=training_set, minibatch_size=minibatch_gpu_in, reals=reals_read, real_labels=labels_read, **loss_args)
-            G_reg = None
+        with tf.name_scope('G_loss'):
+            G_loss, G_reg = dnnlib.util.call_func_by_name(Gs=Gs, G=G_gpu, D=D_gpu, opt=G_opt, training_set=training_set,
+                                                          minibatch_size=minibatch_gpu_in)
+        with tf.name_scope('D_loss'):
+            D_loss, D_reg = dnnlib.util.call_func_by_name(Gs=Gs, G=G_gpu, D=D_gpu, opt=D_opt, training_set=training_set,
+                                                          minibatch_size=minibatch_gpu_in, reals=reals_read,
+                                                          labels=labels_read)
 
         # Register gradients.
         G_reg_opt = tflib.Optimizer(name='RegG', share=G_opt, cross_shard=True, **G_opt_args)
