@@ -537,7 +537,7 @@ def training_loop(
     input_fn, training_set = get_input_fn(load_training_set, num_gpus, mirror_augment=mirror_augment, drange_net=drange_net)
 
     def model_fn(features, labels, mode, params):
-        nonlocal G_opt_args, D_opt_args, sched_args, G_reg_interval, D_reg_interval, lazy_regularization
+        nonlocal G_opt_args, D_opt_args, sched_args, G_reg_interval, D_reg_interval, lazy_regularization, G_smoothing_kimg
         assert mode == tf.estimator.ModeKeys.TRAIN
         num_channels = features.shape[1].value
         resolution = features.shape[2].value
